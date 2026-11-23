@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy
+scipy
+pandas
+joblib
+scikit-learn==1.9.1  # must match the version eog_model.joblib was saved with
