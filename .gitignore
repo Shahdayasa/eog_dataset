@@ -3,6 +3,9 @@
 __pycache__/
 *.pyc
 
+# Live session state (personal baseline per device)
+baselines/
+
 # Editors / OS
 .vscode/
 .idea/

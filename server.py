@@ -64,6 +64,7 @@ HISTORY_LEN = 360           # predictions kept per device (1 h at 10 s)
 CALIB_S = 60                # resting time for gain calibration
 CALIB_FILE = HERE / "calibration.json"
 RECORD_DIR = HERE / "recordings"
+BASELINE_DIR = HERE / "baselines"    # personal baselines, so a server restart does not lose them
 
 
 def _required_env(name):
@@ -168,10 +169,41 @@ _devices = {}
 _devices_lock = threading.Lock()
 
 
+def _baseline_path(device_id):
+    return BASELINE_DIR / (re.sub(r"[^A-Za-z0-9_-]", "_", device_id) + ".json")
+
+
+def _save_baseline(device_id, baseline):
+    """Keep the baseline on disk; it belongs to this model's feature space."""
+    BASELINE_DIR.mkdir(exist_ok=True)
+    _baseline_path(device_id).write_text(json.dumps({**baseline, "model": MODEL_PATH.name}, indent=2))
+
+
+def _load_baseline(device_id):
+    path = _baseline_path(device_id)
+    if not (BASELINE_MODE and path.is_file()):
+        return None
+    try:
+        b = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        print(f"[server] ignoring unreadable {path.name}: {e}")
+        return None
+    if b.get("model") != MODEL_PATH.name or set(b.get("medians", {})) != set(FEATURES):
+        print(f"[server] ignoring {path.name}: recorded with another model")
+        return None
+    print(f"[server] loaded the baseline of {device_id} from {path.name} "
+          f"(recorded {datetime.fromtimestamp(b['finished_at']):%Y-%m-%d %H:%M})")
+    return b
+
+
 def _get_device(device_id, create=True):
     with _devices_lock:
         if create:
-            return _devices.setdefault(device_id, DeviceState())
+            if device_id not in _devices:
+                dev = DeviceState()
+                dev.baseline = _load_baseline(device_id)
+                _devices[device_id] = dev
+            return _devices[device_id]
         dev = _devices.get(device_id)
     if dev is None:
         raise HTTPException(status_code=404, detail="unknown device (is the ESP32 sending?)")
@@ -372,6 +404,11 @@ async def ingest(
                 with _gain_lock:
                     gain = AMP_GAIN
                 dev.baseline, dev.base_error = _compute_baseline(data, gain)
+                if dev.baseline is not None:
+                    try:
+                        _save_baseline(x_device_id, dev.baseline)
+                    except OSError as e:
+                        print(f"[server] could not save the baseline: {e}")
 
         if dev.since_pred >= WINDOW_N:
             buf = np.fromiter(dev.buf, dtype=float, count=len(dev.buf))
@@ -471,6 +508,7 @@ def baseline_start(device_id: str, x_api_key: str = Header(None)):
     with dev.lock:
         # a new baseline usually means a new person: drop the old one right away
         dev.base_collect, dev.base_n, dev.baseline, dev.base_error = [], 0, None, None
+        _baseline_path(device_id).unlink(missing_ok=True)
     return {"ok": True, "seconds": BASELINE_S}
 
 
@@ -656,7 +694,7 @@ async function tick(){
    if(b.running){$('baseBar').value=b.collected_s;$('baseTxt').textContent=b.collected_s.toFixed(0)+' / '+b.total_s+' s';}
    else if(b.error){$('baseRes').innerHTML='<span class="warn">&#9888; Baseline failed: '+b.error+'</span>';}
    else if(b.baseline){const m=b.baseline.medians;
-    $('baseRes').innerHTML='&#10003; Baseline recorded at '+new Date(b.baseline.finished_at*1000).toLocaleTimeString()+
+    $('baseRes').innerHTML='&#10003; Baseline recorded on '+new Date(b.baseline.finished_at*1000).toLocaleString()+
      ' ('+b.baseline.clean_windows+'/'+b.baseline.total_windows+' clean windows): '+
      'blinks '+m.Blink_Rate_bpm.toFixed(0)+'/min, RMS '+m.RMS.toFixed(3)+' mV';}
    else{$('baseRes').innerHTML='<span class="warn">No baseline yet &mdash; predictions show "needs baseline".</span>';}
